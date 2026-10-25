@@ -1,4 +1,6 @@
 import os
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -9,7 +11,19 @@ from telegram.ext import (
 )
 from groq import Groq
 
-# Secure environment variable retrieval
+# --- DUMMY WEB SERVER (Unlocks Render Free Tier) ---
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Syndrome is online and operational.")
+
+def start_dummy_server():
+    port = int(os.getenv("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    server.serve_forever()
+
+# --- CONFIGURATION ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 CHANNEL_ID = os.getenv("CHANNEL_ID", "@buddysonlywife")
@@ -37,7 +51,6 @@ You MUST speak, think, and write ONLY in English under all circumstances.
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 
-
 def generate_response(user_message: str) -> str:
     chat_completion = groq_client.chat.completions.create(
         messages=[
@@ -49,25 +62,17 @@ def generate_response(user_message: str) -> str:
     )
     return chat_completion.choices[0].message.content
 
-
-async def post_to_channel_command(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-):
+async def post_to_channel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_prompt = " ".join(context.args)
     if not user_prompt:
-        await update.message.reply_text(
-            "Give me a topic or situation to monologue about! E.g.: /post My new Omnidroid upgrade"
-        )
+        await update.message.reply_text("Give me a topic or situation to monologue about! E.g.: /post My new Omnidroid upgrade")
         return
 
-    request_prompt = (
-        f"Write a public channel post about this topic/situation: {user_prompt}"
-    )
+    request_prompt = f"Write a public channel post about this topic/situation: {user_prompt}"
     syndrome_response = generate_response(request_prompt)
 
     await context.bot.send_message(chat_id=CHANNEL_ID, text=syndrome_response)
     await update.message.reply_text("Dispatched to the channel, sweetheart.")
-
 
 async def handle_mention(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
@@ -86,24 +91,21 @@ async def handle_mention(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_private_chat or is_mentioned:
         cleaned_text = text.replace(f"@{bot_username}", "").strip()
         formatted_input = f"[{user_first_name} said]: {cleaned_text}"
-
+        
         response = generate_response(formatted_input)
         await update.message.reply_text(response)
 
-
 def main():
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    # Start web server thread for Render health checks
+    threading.Thread(target=start_dummy_server, daemon=True).start()
 
-    # Commands: /post to broadcast to channel, or /postar as an alias
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("post", post_to_channel_command))
     app.add_handler(CommandHandler("postar", post_to_channel_command))
-    app.add_handler(
-        MessageHandler(filters.TEXT & (~filters.COMMAND), handle_mention)
-    )
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_mention))
 
     print("Syndrome is online and operational...")
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
