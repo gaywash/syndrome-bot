@@ -1,4 +1,6 @@
 import os
+import asyncio
+import logging
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update
@@ -11,15 +13,28 @@ from telegram.ext import (
 )
 from groq import Groq
 
-# --- DUMMY WEB SERVER (Unlocks Render Free Tier) ---
+# Configure logging
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
+
+# --- WEB SERVER (Render Health Checks & HEAD/GET support) ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+
     def do_GET(self):
         self.send_response(200)
+        self.send_header("Content-type", "text/plain")
         self.end_headers()
         self.wfile.write(b"Syndrome is online and operational.")
 
 def start_dummy_server():
-    port = int(os.getenv("PORT", 8080))
+    port = int(os.getenv("PORT", 10000))
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
     server.serve_forever()
 
@@ -51,25 +66,35 @@ You MUST speak, think, and write ONLY in English under all circumstances.
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 
-def generate_response(user_message: str) -> str:
-    chat_completion = groq_client.chat.completions.create(
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_message},
-        ],
-        model="llama-3.3-70b-versatile",
-        temperature=0.85,
-    )
-    return chat_completion.choices[0].message.content
+async def generate_response_async(user_message: str) -> str:
+    loop = asyncio.get_running_loop()
+    def _call():
+        completion = groq_client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+            model="llama-3.3-70b-versatile",
+            temperature=0.85,
+        )
+        return completion.choices[0].message.content
+
+    return await loop.run_in_executor(None, _call)
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    reply = await generate_response_async("Wifey just turned your comms on and said hello.")
+    await update.message.reply_text(reply)
 
 async def post_to_channel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_prompt = " ".join(context.args)
     if not user_prompt:
-        await update.message.reply_text("Give me a topic or situation to monologue about! E.g.: /post My new Omnidroid upgrade")
+        await update.message.reply_text(
+            "Give me a topic or situation to monologue about! E.g.: /post My new Omnidroid upgrade"
+        )
         return
 
     request_prompt = f"Write a public channel post about this topic/situation: {user_prompt}"
-    syndrome_response = generate_response(request_prompt)
+    syndrome_response = await generate_response_async(request_prompt)
 
     await context.bot.send_message(chat_id=CHANNEL_ID, text=syndrome_response)
     await update.message.reply_text("Dispatched to the channel, sweetheart.")
@@ -83,29 +108,37 @@ async def handle_mention(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     bot_username = context.bot.username
     is_private_chat = update.message.chat.type == "private"
-    is_mentioned = f"@{bot_username}" in text or (
-        update.message.reply_to_message
-        and update.message.reply_to_message.from_user.id == context.bot.id
-    )
+    is_mentioned = False
+
+    if bot_username:
+        is_mentioned = f"@{bot_username.lower()}" in text.lower()
+
+    if update.message.reply_to_message and update.message.reply_to_message.from_user:
+        if update.message.reply_to_message.from_user.id == context.bot.id:
+            is_mentioned = True
 
     if is_private_chat or is_mentioned:
-        cleaned_text = text.replace(f"@{bot_username}", "").strip()
-        formatted_input = f"[{user_first_name} said]: {cleaned_text}"
+        cleaned_text = text
+        if bot_username:
+            cleaned_text = text.replace(f"@{bot_username}", "").strip()
         
-        response = generate_response(formatted_input)
+        formatted_input = f"[{user_first_name} said]: {cleaned_text}"
+        response = await generate_response_async(formatted_input)
         await update.message.reply_text(response)
 
 def main():
-    # Start web server thread for Render health checks
-    threading.Thread(target=start_dummy_server, daemon=True).start()
+    web_thread = threading.Thread(target=start_dummy_server, daemon=True)
+    web_thread.start()
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("post", post_to_channel_command))
     app.add_handler(CommandHandler("postar", post_to_channel_command))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_mention))
 
-    print("Syndrome is online and operational...")
-    app.run_polling()
+    logger.info("Syndrome bot loop has officially started!")
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
